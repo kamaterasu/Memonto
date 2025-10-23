@@ -44,14 +44,18 @@ func (m model) View() string {
 	prompt := lipgloss.NewStyle().Foreground(lipgloss.Color("212")).Render(c.Prompt)
 	bar := m.progress.ViewAs(float64(m.idx) / float64(len(m.cards)))
 	fb := m.feedback
-	return st.Render(header + "\n\n" + prompt + "\n\n" + m.input.View() + "\n\n" + bar + "\n\n" + fb + "\n(enter=check, n=next, q=quit)")
+	hint := "(enter=check)"
+	if m.checking {
+		hint = "(n=next, q=quit)"
+	}
+	return st.Render(header + "\n\n" + prompt + "\n\n" + m.input.View() + "\n\n" + bar + "\n\n" + fb + "\n" + hint)
 }
 
 func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	switch msg := msg.(type) {
 	case tea.KeyMsg:
 		switch msg.String() {
-		case "ctrl+c", "q":
+		case "ctrl+c":
 			m.quit = true
 			return m, tea.Quit
 		case "enter":
@@ -63,15 +67,28 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			Grade(&m.cards[m.idx], correct, time.Now())
 			m.feedback = feedbackLine(correct, m.cards[m.idx])
 			_ = SaveProgress(m.cards[m.idx])
+			m.checking = true
+			m.input.Blur()
 			return m, nil
-		case "n":
+		case "n", "right", "tab":
+			if !m.checking {
+				break
+			}
 			if m.idx < len(m.cards)-1 {
 				m.idx++
-				m.input.SetValue("")
 				m.feedback = ""
+				m.checking = false
+				m.input.SetValue("")
+				m.input.Focus()
 			} else {
 				return m, tea.Quit
 			}
+		case "q":
+			if !m.checking {
+				break
+			}
+			m.quit = true
+			return m, tea.Quit
 		}
 	}
 	var cmd tea.Cmd
