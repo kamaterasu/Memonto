@@ -1,6 +1,7 @@
 package main
 
 import "time"
+import "sort"
 
 var boxIntervals = map[int]time.Duration{
 	1: 0,
@@ -35,5 +36,6 @@ func DueCards(cards []Card, now time.Time) []Card {
 			out = append(out, c)
 		}
 	}
+	sort.SliceStable(out, func(i, j int) bool { return out[i].SeenCount > out[j].SeenCount })
 	return out
 }
