@@ -22,6 +22,7 @@ type Card struct {
 	LastReviewed time.Time `json:"last_reviewed"`
 	Streak       int       `json:"streak"`
 	TimesSeen    int       `json:"times_seen"`
+	SeenCount    int       `json:"seen_count"`
 }
 
 // Load/Save to JSON in XDG data dir.

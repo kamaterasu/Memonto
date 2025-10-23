@@ -7,13 +7,32 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
+	"sort"
 	"strings"
 	"time"
 )
 
 type CommandEvent struct {
 	When    time.Time
-	Command string // scrubbed
+	Command string
+}
+
+var (
+	pathLike   = regexp.MustCompile(`(~|\.{1,2}|/)[\w@./\-+:%]+`)
+	urlRe      = regexp.MustCompile(`https?://\S+`)
+	uuidRe     = regexp.MustCompile(`\b[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}\b`)
+	shaRe      = regexp.MustCompile(`\b[0-9a-f]{7,40}\b`)
+	ipRe       = regexp.MustCompile(`\b\d{1,3}(\.\d{1,3}){3}\b`)
+	bigNumRe   = regexp.MustCompile(`\b\d{3,}\b`)
+	varAssign  = regexp.MustCompile(`\b[A-Za-z_][A-Za-z0-9_]*=([^ \t]+)`)
+	wsCollapse = regexp.MustCompile(`\s+`)
+)
+
+var valueFlags = map[string]string{
+	"-o": "<PATH>", "--output": "<PATH>", "-i": "<PATH>", "--input": "<PATH>",
+	"-f": "<FILE>", "--file": "<FILE>", "--namespace": "<NS>", "-n": "<NS>",
+	"--context": "<CTX>", "-r": "<REPO>", "--repo": "<REPO>",
+	"--kubeconfig": "<PATH>", "--config": "<PATH>",
 }
 
 func ParseHistory() []CommandEvent {
@@ -57,7 +76,7 @@ func guessHistoryFiles() []string {
 	return out
 }
 
-var zshExt = regexp.MustCompile(`^: (\d+):(\d+);`) // : <epoch>:<dur>;cmd
+var zshExt = regexp.MustCompile(`^: (\d+):(\d+);`)
 
 func normalizeHistoryLine(line string) (cmd string, when time.Time) {
 	if m := zshExt.FindStringSubmatch(line); len(m) == 3 {
@@ -112,24 +131,26 @@ func isTricky(cmd string) bool {
 }
 
 func GenerateCards(events []CommandEvent, existing []Card) []Card {
-	seen := map[string]bool{}
-	for _, c := range existing {
-		seen[c.ID] = true
+	idx := map[string]*Card{}
+	for i := range existing {
+		idx[existing[i].ID] = &existing[i]
 	}
+
 	var out []Card
 	for _, ev := range events {
 		if !isTricky(ev.Command) {
 			continue
 		}
-		prompt, answer, hint := cloze(ev.Command)
-		id := hash(normalizeCommand(ev.Command))
-		if seen[id] {
+		canon := normalizeCommand(ev.Command)
+		id := hash(canon)
+		if c, ok := idx[id]; ok {
+			c.SeenCount++
 			continue
 		}
-		tags := deriveTags(ev.Command)
+		prompt, answer, hint := cloze(canon)
 		out = append(out, Card{
-			ID: id, Prompt: prompt, Answer: answer, Hint: hint, Command: ev.Command,
-			Tags: tags, Box: 1, NextDue: time.Now(),
+			ID: id, Prompt: prompt, Answer: answer, Hint: hint, Command: canon,
+			Tags: deriveTags(canon), Box: 1, NextDue: time.Now(), SeenCount: 1,
 		})
 	}
 	return out
@@ -163,48 +184,153 @@ func unique(ss []string) []string {
 
 func hash(s string) string { h := sha1.Sum([]byte(s)); return hex.EncodeToString(h[:]) }
 
-// normalizeCommand removes volatile args (paths, quoted blobs) for ID hashing.
 func normalizeCommand(s string) string {
+	// strip/standardize quotes first
 	s = quoteBlob.ReplaceAllString(s, "<STR>")
-	s = regexp.MustCompile(`/[^\s]+`).ReplaceAllString(s, "/<PATH>")
-	return s
+
+	// mask volatile atoms
+	s = urlRe.ReplaceAllString(s, "<URL>")
+	s = emailRe.ReplaceAllString(s, "***@***")
+	s = uuidRe.ReplaceAllString(s, "<UUID>")
+	s = shaRe.ReplaceAllString(s, "<SHA>")
+	s = ipRe.ReplaceAllString(s, "<IP>")
+	s = bigNumRe.ReplaceAllString(s, "<NUM>")
+	s = varAssign.ReplaceAllString(s, "${VAR}=<VAL>")
+	s = pathLike.ReplaceAllString(s, "<PATH>")
+
+	// token-level pass to replace values after known flags
+	toks := strings.Fields(s)
+	for i := 0; i < len(toks); i++ {
+		if ph, ok := valueFlags[toks[i]]; ok && i+1 < len(toks) {
+			// don't stomp other flags
+			if !strings.HasPrefix(toks[i+1], "-") {
+				toks[i+1] = ph
+			}
+		}
+	}
+
+	// optional: sort standalone long flags for stability (mostly safe)
+	toks = stableFlagOrder(toks)
+
+	// rebuild & collapse whitespace
+	out := strings.Join(toks, " ")
+	out = wsCollapse.ReplaceAllString(out, " ")
+	return strings.TrimSpace(out)
 }
 
-// cloze hides an interesting flag or subcommand to create a recall prompt.
+func stableFlagOrder(toks []string) []string {
+	// move --long-flags that don’t have attached values into a stable order
+	flags, rest := []string{}, []string{}
+	for i := 0; i < len(toks); i++ {
+		t := toks[i]
+		if strings.HasPrefix(t, "--") {
+			// if next token is a value (not a flag), keep pair in rest
+			if i+1 < len(toks) && !strings.HasPrefix(toks[i+1], "-") && valueFlags[t] != "" {
+				rest = append(rest, t, toks[i+1])
+				i++
+			} else {
+				flags = append(flags, t)
+			}
+		} else {
+			rest = append(rest, t)
+		}
+	}
+	sort.Strings(flags)
+	return append(append([]string{}, rest[0:1]...), append(flags, rest[1:]...)...)
+}
+
+func isBadAnswerToken(w string) bool {
+	if w == "" {
+		return true
+	}
+	if strings.Contains(w, "<") && strings.Contains(w, ">") {
+		return true
+	} // placeholders
+	if strings.Contains(w, "/") || strings.HasPrefix(w, "~") || strings.HasPrefix(w, ".") {
+		return true
+	}
+	if urlRe.MatchString(w) || pathLike.MatchString(w) || shaRe.MatchString(w) || uuidRe.MatchString(w) {
+		return true
+	}
+	if bigNumRe.MatchString(w) {
+		return true
+	}
+	return false
+}
+
+func preferSubcommands(cmdName string) map[string]bool {
+	switch cmdName {
+	case "git":
+		return set("rebase", "cherry-pick", "stash", "reset", "restore", "revert", "checkout", "commit", "fetch", "merge", "push", "pull")
+	case "kubectl":
+		return set("get", "describe", "apply", "delete", "logs", "exec", "rollout", "scale", "port-forward", "top")
+	case "ffmpeg":
+		return set() // mostly flags
+	default:
+		return set()
+	}
+}
+
+func set(ss ...string) map[string]bool {
+	m := map[string]bool{}
+	for _, s := range ss {
+		m[s] = true
+	}
+	return m
+}
+
 func cloze(cmd string) (prompt, answer, hint string) {
-	// Prefer hiding long flags, then short flags, else subcommand word.
 	words := strings.Fields(cmd)
 	if len(words) == 0 {
 		return "", "", ""
 	}
-	// Search candidate index
+
+	candidates := []int{}
+	// 1) explicit “good” tokens
+	good := preferSubcommands(words[0])
+	for i := 1; i < len(words); i++ {
+		if good[words[i]] {
+			candidates = append(candidates, i)
+		}
+	}
+	// 2) long flags
+	for i := 0; i < len(words); i++ {
+		if strings.HasPrefix(words[i], "--") {
+			candidates = append(candidates, i)
+		}
+	}
+	// 3) short flags
+	for i := 0; i < len(words); i++ {
+		if strings.HasPrefix(words[i], "-") && !strings.HasPrefix(words[i], "--") {
+			candidates = append(candidates, i)
+		}
+	}
+	// 4) fallback: the first non-dynamic non-command token
+	if len(candidates) == 0 {
+		for i := 1; i < len(words); i++ {
+			if !isBadAnswerToken(words[i]) {
+				candidates = append(candidates, i)
+				break
+			}
+		}
+	}
+
+	// pick first candidate that isn’t junk
 	idx := -1
-	for i, w := range words {
-		if strings.HasPrefix(w, "--") {
+	for _, i := range candidates {
+		if !isBadAnswerToken(words[i]) {
 			idx = i
 			break
 		}
 	}
 	if idx == -1 {
-		for i, w := range words {
-			if strings.HasPrefix(w, "-") {
-				idx = i
-				break
-			}
-		}
-	}
-	if idx == -1 && len(words) > 1 {
-		idx = 1
-	} // subcommand
-	if idx == -1 {
 		idx = 0
-	}
+	} // final fallback (rare)
 
 	answer = words[idx]
-	masked := make([]string, len(words))
-	copy(masked, words)
+	masked := append([]string{}, words...)
 	masked[idx] = "_____"
 	prompt = strings.Join(masked, " ")
-	hint = "Type the missing flag/word"
+	hint = "Type the missing flag/subcommand"
 	return
 }
