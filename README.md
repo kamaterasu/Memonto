@@ -14,16 +14,16 @@ Your future self forgets flags. Memento learns from `bash`/`zsh` history, scrubs
 
 
 ## Features
-- 🧠 **Automatic ingest** from `~/.zsh_history` / `~/.bash_history`
-- ✨ **Smart heuristics** find long/piped/multi‑flag commands ("tricky")
-- 🃏 **Cloze cards** that hide a flag/subcommand
-- 📦 **Leitner boxes** (1→5) with sane default intervals
-- 🏷️ **Tags** inferred from tools (git/kubectl/ffmpeg/etc.)
-- 🔒 **Local‑only storage** (JSON in XDG data dir)
+-  **Automatic ingest** from `~/.zsh_history` / `~/.bash_history`
+-  **Smart heuristics** find long/piped/multi‑flag commands ("tricky")
+-  **Cloze cards** that hide a flag/subcommand
+-  **Leitner boxes** (1→5) with sane default intervals
+-  **Tags** inferred from tools (git/kubectl/ffmpeg/etc.)
+-  **Local‑only storage** (JSON in XDG data dir)
 
 ## Privacy
 Your history never leaves your machine. We scrub obvious tokens/emails/hex keys during ingest. Review the regexes in `ingest.go` and adjust for your environment.
 
 ## Roadmap
-- [] Tag filters and multiple‑choice
-- [] Import/export anonymized decks
+- [ ] Tag filters and multiple‑choice
+- [ ] Import/export anonymized decks
