@@ -36,8 +36,9 @@ var valueFlags = map[string]string{
 }
 
 func ParseHistory() []CommandEvent {
-	var events []CommandEvent
+	uniq := make(map[string]CommandEvent)
 	paths := guessHistoryFiles()
+
 	for _, p := range paths {
 		f, err := os.Open(p)
 		if err != nil {
@@ -49,15 +50,26 @@ func ParseHistory() []CommandEvent {
 			if line == "" {
 				continue
 			}
-			cmd, when := normalizeHistoryLine(line)
-			cmd = scrub(cmd)
-			if isIgnorable(cmd) {
+			raw, when := normalizeHistoryLine(line)
+			raw = scrub(raw)
+			if isIgnorable(raw) {
 				continue
 			}
-			events = append(events, CommandEvent{When: when, Command: cmd})
+			canon := normalizeCommand(raw)
+
+			prev, ok := uniq[canon]
+			if !ok || when.After(prev.When) {
+				uniq[canon] = CommandEvent{When: when, Command: canon}
+			}
 		}
 		_ = f.Close()
 	}
+
+	events := make([]CommandEvent, 0, len(uniq))
+	for _, ev := range uniq {
+		events = append(events, ev)
+	}
+	sort.Slice(events, func(i, j int) bool { return events[i].When.After(events[j].When) })
 	return events
 }
 
@@ -136,22 +148,31 @@ func GenerateCards(events []CommandEvent, existing []Card) []Card {
 		idx[existing[i].ID] = &existing[i]
 	}
 
-	var out []Card
+	out := []Card{}
+	seenIDs := make(map[string]bool)
+
 	for _, ev := range events {
 		if !isTricky(ev.Command) {
 			continue
 		}
+
 		canon := normalizeCommand(ev.Command)
 		id := hash(canon)
+
+		if seenIDs[id] {
+			continue
+		}
 		if c, ok := idx[id]; ok {
 			c.SeenCount++
 			continue
 		}
+
 		prompt, answer, hint := cloze(canon)
 		out = append(out, Card{
 			ID: id, Prompt: prompt, Answer: answer, Hint: hint, Command: canon,
 			Tags: deriveTags(canon), Box: 1, NextDue: time.Now(), SeenCount: 1,
 		})
+		seenIDs[id] = true
 	}
 	return out
 }
