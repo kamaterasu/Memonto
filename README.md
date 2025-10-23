@@ -25,5 +25,6 @@ Your future self forgets flags. Memento learns from `bash`/`zsh` history, scrubs
 Your history never leaves your machine. We scrub obvious tokens/emails/hex keys during ingest. Review the regexes in `ingest.go` and adjust for your environment.
 
 ## Roadmap
-- [ ] Tag filters and multiple‑choice
+- [ ] Tag filters
+- [ ] Multiple-Choice
 - [ ] Import/export anonymized decks
