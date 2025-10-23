@@ -97,7 +97,6 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 }
 
 func checkAnswer(c Card, ans string) bool {
-	// Basic: exact match or contained; case-insensitive.
 	if ans == "" {
 		return false
 	}
@@ -110,14 +109,7 @@ func feedbackLine(ok bool, c Card) string {
 	if ok {
 		return "✔ Correct → " + c.Answer
 	}
-	return "✘ Nope. Correct: " + c.Answer + hintStr(c.Hint)
-}
-
-func hintStr(h string) string {
-	if h == "" {
-		return ""
-	}
-	return "\t( hint: " + h + " )"
+	return "✘ Nope. Correct: " + c.Answer
 }
 
 func RunTUI(all []Card) error {
@@ -126,7 +118,6 @@ func RunTUI(all []Card) error {
 	return err
 }
 
-// Persist only the updated card; keep it simple by reloading and merging.
 func SaveProgress(updated Card) error {
 	cards, err := LoadCards()
 	if err != nil {
