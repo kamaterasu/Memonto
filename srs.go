@@ -36,6 +36,6 @@ func DueCards(cards []Card, now time.Time) []Card {
 			out = append(out, c)
 		}
 	}
-	sort.SliceStable(out, func(i, j int) bool { return out[i].SeenCount > out[j].SeenCount })
+	sort.SliceStable(out, func(i, j int) bool { return out[i].HistoryCount > out[j].HistoryCount })
 	return out
 }

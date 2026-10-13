@@ -1,7 +1,6 @@
 package main
 
 import (
-	"bufio"
 	"crypto/sha1"
 	"encoding/hex"
 	"os"
@@ -15,41 +14,45 @@ import (
 type CommandEvent struct {
 	When    time.Time
 	Command string
+	Count   int
 }
 
 var (
-	pathLike   = regexp.MustCompile(`(~|\.{1,2}|/)[\w@./\-+:%]+`)
-	urlRe      = regexp.MustCompile(`https?://\S+`)
-	uuidRe     = regexp.MustCompile(`\b[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}\b`)
-	shaRe      = regexp.MustCompile(`\b[0-9a-f]{7,40}\b`)
-	ipRe       = regexp.MustCompile(`\b\d{1,3}(\.\d{1,3}){3}\b`)
-	bigNumRe   = regexp.MustCompile(`\b\d{3,}\b`)
-	varAssign  = regexp.MustCompile(`\b[A-Za-z_][A-Za-z0-9_]*=([^ \t]+)`)
-	wsCollapse = regexp.MustCompile(`\s+`)
+	pathLike  = regexp.MustCompile(`(^|[\s=])(?:~|\.{1,2})?/[\w@./\-+:%]*`)
+	urlRe     = regexp.MustCompile(`https?://\S+`)
+	uuidRe    = regexp.MustCompile(`\b[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}\b`)
+	shaRe     = regexp.MustCompile(`\b[0-9a-f]{7,40}\b`)
+	ipRe      = regexp.MustCompile(`\b\d{1,3}(\.\d{1,3}){3}\b`)
+	bigNumRe  = regexp.MustCompile(`\b\d{3,}\b`)
+	varAssign = regexp.MustCompile(`\b([A-Za-z_][A-Za-z0-9_]*)=[^ \t]+`)
 )
 
-var valueFlags = map[string]string{
-	"-o": "<PATH>", "--output": "<PATH>", "-i": "<PATH>", "--input": "<PATH>",
-	"-f": "<FILE>", "--file": "<FILE>", "--namespace": "<NS>", "-n": "<NS>",
-	"--context": "<CTX>", "-r": "<REPO>", "--repo": "<REPO>",
-	"--kubeconfig": "<PATH>", "--config": "<PATH>",
+var longValueFlags = map[string]string{
+	"--output": "<PATH>", "--input": "<PATH>", "--file": "<FILE>", "--namespace": "<NS>",
+	"--context": "<CTX>", "--repo": "<REPO>", "--kubeconfig": "<PATH>", "--config": "<PATH>",
 }
 
-func ParseHistory() []CommandEvent {
-	uniq := make(map[string]CommandEvent)
-	paths := guessHistoryFiles()
+// Short flags mean different things per tool (grep -i vs ffmpeg -i), so scope them.
+var shortValueFlags = map[string]map[string]string{
+	"kubectl": {"-n": "<NS>", "-f": "<FILE>"},
+	"helm":    {"-n": "<NS>", "-f": "<FILE>"},
+	"docker":  {"-f": "<FILE>"},
+	"ffmpeg":  {"-i": "<PATH>"},
+	"curl":    {"-o": "<PATH>"},
+	"gh":      {"-R": "<REPO>"},
+}
 
-	for _, p := range paths {
-		f, err := os.Open(p)
+var cmdSeparators = map[string]bool{"|": true, "||": true, "&&": true, ";": true}
+
+func ParseHistory() ([]CommandEvent, error) {
+	uniq := make(map[string]CommandEvent)
+
+	for _, p := range guessHistoryFiles() {
+		lines, err := readHistoryFile(p)
 		if err != nil {
-			continue
+			return nil, err
 		}
-		s := bufio.NewScanner(f)
-		for s.Scan() {
-			line := strings.TrimSpace(s.Text())
-			if line == "" {
-				continue
-			}
+		for _, line := range lines {
 			raw, when := normalizeHistoryLine(line)
 			raw = scrub(raw)
 			if isIgnorable(raw) {
@@ -57,12 +60,14 @@ func ParseHistory() []CommandEvent {
 			}
 			canon := normalizeCommand(raw)
 
-			prev, ok := uniq[canon]
-			if !ok || when.After(prev.When) {
-				uniq[canon] = CommandEvent{When: when, Command: canon}
+			ev := uniq[canon]
+			ev.Command = canon
+			ev.Count++
+			if when.After(ev.When) {
+				ev.When = when
 			}
+			uniq[canon] = ev
 		}
-		_ = f.Close()
 	}
 
 	events := make([]CommandEvent, 0, len(uniq))
@@ -70,7 +75,49 @@ func ParseHistory() []CommandEvent {
 		events = append(events, ev)
 	}
 	sort.Slice(events, func(i, j int) bool { return events[i].When.After(events[j].When) })
-	return events
+	return events, nil
+}
+
+// readHistoryFile returns one entry per command, joining backslash-continued lines.
+func readHistoryFile(p string) ([]string, error) {
+	b, err := os.ReadFile(p)
+	if err != nil {
+		return nil, err
+	}
+	if strings.Contains(filepath.Base(p), "zsh") {
+		b = unmetafy(b)
+	}
+	out := []string{}
+	cur := ""
+	for _, l := range strings.Split(string(b), "\n") {
+		l = strings.TrimRight(l, "\r")
+		if strings.HasSuffix(l, "\\") {
+			cur += strings.TrimSuffix(l, "\\") + " "
+			continue
+		}
+		if line := strings.TrimSpace(cur + l); line != "" {
+			out = append(out, line)
+		}
+		cur = ""
+	}
+	if line := strings.TrimSpace(cur); line != "" {
+		out = append(out, line)
+	}
+	return out, nil
+}
+
+// zsh stores non-ASCII bytes as 0x83 followed by byte^0x20.
+func unmetafy(b []byte) []byte {
+	out := make([]byte, 0, len(b))
+	for i := 0; i < len(b); i++ {
+		if b[i] == 0x83 && i+1 < len(b) {
+			i++
+			out = append(out, b[i]^0x20)
+			continue
+		}
+		out = append(out, b[i])
+	}
+	return out
 }
 
 func guessHistoryFiles() []string {
@@ -110,9 +157,22 @@ var (
 	hexRe     = regexp.MustCompile(`\b[0-9a-fA-F]{32,}\b`)
 	tokenRe   = regexp.MustCompile(`(?i)(AWS|SECRET|TOKEN|KEY|PASSWORD|PASS|PWD)=\S+`)
 	quoteBlob = regexp.MustCompile(`'[^']+'|"[^"]+"`)
+
+	urlCredRe    = regexp.MustCompile(`(://)[^/\s:@]+:[^/\s@]+@`)
+	secretFlagRe = regexp.MustCompile(`(?i)(--?(?:password|passwd|pass|token|secret|api-?key)[= ])[^\s'"]+`)
+	userPassRe   = regexp.MustCompile(`(\s(?:-u|--user)[= ]?)[^\s'"]+:[^\s'"]+`)
+	mysqlPassRe  = regexp.MustCompile(`(\b(?:mysql|mysqldump|mariadb)\b.*?\s-p)[^\s'"]+`)
+	bearerRe     = regexp.MustCompile(`(?i)(bearer\s+)[^\s'"]+`)
+	knownTokenRe = regexp.MustCompile(`\b(?:gh[pousr]_|github_pat_|glpat-|xox[abprs]-|sk-|AKIA)[A-Za-z0-9_\-]{10,}`)
 )
 
 func scrub(s string) string {
+	s = urlCredRe.ReplaceAllString(s, "${1}***@")
+	s = secretFlagRe.ReplaceAllString(s, "${1}***")
+	s = userPassRe.ReplaceAllString(s, "${1}***")
+	s = mysqlPassRe.ReplaceAllString(s, "${1}***")
+	s = bearerRe.ReplaceAllString(s, "${1}***")
+	s = knownTokenRe.ReplaceAllString(s, "<SECRET>")
 	s = tokenRe.ReplaceAllString(s, "$1=***")
 	s = emailRe.ReplaceAllString(s, "***@***")
 	s = hexRe.ReplaceAllString(s, "<HEX>")
@@ -120,59 +180,72 @@ func scrub(s string) string {
 }
 
 func isIgnorable(s string) bool {
-	if strings.HasPrefix(s, "#") {
-		return true
-	}
-	if strings.HasPrefix(s, "cd ") {
-		return true
-	}
-	if strings.HasPrefix(s, "ls") {
-		return true
-	}
-	if len(strings.Fields(s)) == 0 {
-		return true
-	}
-	return false
+	f := strings.Fields(s)
+	return len(f) == 0 || strings.HasPrefix(f[0], "#") || ignoredHeads[f[0]]
 }
 
-// Heuristic: mark as tricky if it's long, has pipes, multiple flags, or risky flags.
+// shell keywords: loop/if one-liners make poor cards since the blank belongs to an inner tool
+var ignoredHeads = map[string]bool{"cd": true, "ls": true, "for": true, "while": true, "until": true, "if": true}
+
+// Heuristic: mark as tricky if it has pipes, multiple flags, or risky flags.
 func isTricky(cmd string) bool {
-	flags := strings.Count(cmd, " -") + strings.Count(cmd, " --")
-	return len(cmd) > 40 || strings.Contains(cmd, "|") || strings.Contains(cmd, "&&") || flags >= 2 ||
+	flags := strings.Count(cmd, " -")
+	return strings.Contains(cmd, "|") || strings.Contains(cmd, "&&") || flags >= 2 ||
 		strings.Contains(cmd, "-rf") || strings.Contains(cmd, "--force")
+}
+
+// toolIndex skips leading sudo and VAR=value assignments to find the real tool.
+func toolIndex(words []string) int {
+	for i, w := range words {
+		if w != "sudo" && !strings.Contains(w, "=") {
+			return i
+		}
+	}
+	return 0
+}
+
+// clozeKey identifies what a card teaches; one card per tool+answer is enough.
+func clozeKey(cmd, answer string) string {
+	words := strings.Fields(cmd)
+	if len(words) == 0 {
+		return answer
+	}
+	return words[toolIndex(words)] + " " + answer
 }
 
 func GenerateCards(events []CommandEvent, existing []Card) []Card {
 	idx := map[string]*Card{}
+	taken := map[string]bool{}
 	for i := range existing {
 		idx[existing[i].ID] = &existing[i]
+		taken[clozeKey(existing[i].Command, existing[i].Answer)] = true
 	}
 
-	out := []Card{}
-	seenIDs := make(map[string]bool)
+	// most-used first, so the variant you actually type wins the tool+answer slot
+	sorted := append([]CommandEvent{}, events...)
+	sort.SliceStable(sorted, func(i, j int) bool { return sorted[i].Count > sorted[j].Count })
 
-	for _, ev := range events {
+	out := []Card{}
+	for _, ev := range sorted {
 		if !isTricky(ev.Command) {
 			continue
 		}
-
-		canon := normalizeCommand(ev.Command)
-		id := hash(canon)
-
-		if seenIDs[id] {
-			continue
-		}
+		id := hash(ev.Command)
 		if c, ok := idx[id]; ok {
-			c.SeenCount++
+			c.HistoryCount = ev.Count
 			continue
 		}
 
-		prompt, answer, hint := cloze(canon)
+		prompt, answer, hint := cloze(ev.Command)
+		key := clozeKey(ev.Command, answer)
+		if answer == "" || taken[key] {
+			continue
+		}
+		taken[key] = true
 		out = append(out, Card{
-			ID: id, Prompt: prompt, Answer: answer, Hint: hint, Command: canon,
-			Tags: deriveTags(canon), Box: 1, NextDue: time.Now(), SeenCount: 1,
+			ID: id, Prompt: prompt, Answer: answer, Hint: hint, Command: ev.Command,
+			Tags: deriveTags(ev.Command), Box: 1, NextDue: time.Now(), HistoryCount: ev.Count,
 		})
-		seenIDs[id] = true
 	}
 	return out
 }
@@ -182,7 +255,7 @@ func deriveTags(cmd string) []string {
 	if len(parts) == 0 {
 		return nil
 	}
-	cmdName := parts[0]
+	cmdName := parts[toolIndex(parts)]
 	tags := []string{cmdName}
 	for _, t := range []string{"git", "kubectl", "ffmpeg", "docker", "grep", "awk", "sed"} {
 		if strings.HasPrefix(cmd, t+" ") {
@@ -216,48 +289,34 @@ func normalizeCommand(s string) string {
 	s = shaRe.ReplaceAllString(s, "<SHA>")
 	s = ipRe.ReplaceAllString(s, "<IP>")
 	s = bigNumRe.ReplaceAllString(s, "<NUM>")
-	s = varAssign.ReplaceAllString(s, "${VAR}=<VAL>")
-	s = pathLike.ReplaceAllString(s, "<PATH>")
+	s = varAssign.ReplaceAllString(s, "${1}=<VAL>")
+	s = pathLike.ReplaceAllString(s, "${1}<PATH>")
 
-	// token-level pass to replace values after known flags
+	// token-level pass to replace values after known flags, tracking the tool per pipeline segment
 	toks := strings.Fields(s)
-	for i := 0; i < len(toks); i++ {
-		if ph, ok := valueFlags[toks[i]]; ok && i+1 < len(toks) {
-			// don't stomp other flags
-			if !strings.HasPrefix(toks[i+1], "-") {
-				toks[i+1] = ph
-			}
-		}
-	}
-
-	// optional: sort standalone long flags for stability (mostly safe)
-	toks = stableFlagOrder(toks)
-
-	// rebuild & collapse whitespace
-	out := strings.Join(toks, " ")
-	out = wsCollapse.ReplaceAllString(out, " ")
-	return strings.TrimSpace(out)
-}
-
-func stableFlagOrder(toks []string) []string {
-	// move --long-flags that don’t have attached values into a stable order
-	flags, rest := []string{}, []string{}
+	tool := ""
 	for i := 0; i < len(toks); i++ {
 		t := toks[i]
-		if strings.HasPrefix(t, "--") {
-			// if next token is a value (not a flag), keep pair in rest
-			if i+1 < len(toks) && !strings.HasPrefix(toks[i+1], "-") && valueFlags[t] != "" {
-				rest = append(rest, t, toks[i+1])
-				i++
-			} else {
-				flags = append(flags, t)
+		if cmdSeparators[t] {
+			tool = ""
+			continue
+		}
+		if tool == "" {
+			if t != "sudo" && !strings.Contains(t, "=") {
+				tool = t
 			}
-		} else {
-			rest = append(rest, t)
+			continue
+		}
+		ph, ok := longValueFlags[t]
+		if !ok {
+			ph, ok = shortValueFlags[tool][t]
+		}
+		// don't stomp other flags
+		if ok && i+1 < len(toks) && !strings.HasPrefix(toks[i+1], "-") && !cmdSeparators[toks[i+1]] {
+			toks[i+1] = ph
 		}
 	}
-	sort.Strings(flags)
-	return append(append([]string{}, rest[0:1]...), append(flags, rest[1:]...)...)
+	return strings.Join(toks, " ")
 }
 
 func isBadAnswerToken(w string) bool {
@@ -306,36 +365,27 @@ func cloze(cmd string) (prompt, answer, hint string) {
 		return "", "", ""
 	}
 
+	t := toolIndex(words)
 	candidates := []int{}
 	// 1) explicit “good” tokens
-	good := preferSubcommands(words[0])
-	for i := 1; i < len(words); i++ {
+	good := preferSubcommands(words[t])
+	for i := t + 1; i < len(words); i++ {
 		if good[words[i]] {
 			candidates = append(candidates, i)
 		}
 	}
 	// 2) long flags
-	for i := 0; i < len(words); i++ {
+	for i := t + 1; i < len(words); i++ {
 		if strings.HasPrefix(words[i], "--") {
 			candidates = append(candidates, i)
 		}
 	}
 	// 3) short flags
-	for i := 0; i < len(words); i++ {
+	for i := t + 1; i < len(words); i++ {
 		if strings.HasPrefix(words[i], "-") && !strings.HasPrefix(words[i], "--") {
 			candidates = append(candidates, i)
 		}
 	}
-	// 4) fallback: the first non-dynamic non-command token
-	if len(candidates) == 0 {
-		for i := 1; i < len(words); i++ {
-			if !isBadAnswerToken(words[i]) {
-				candidates = append(candidates, i)
-				break
-			}
-		}
-	}
-
 	// pick first candidate that isn’t junk
 	idx := -1
 	for _, i := range candidates {
@@ -345,8 +395,8 @@ func cloze(cmd string) (prompt, answer, hint string) {
 		}
 	}
 	if idx == -1 {
-		idx = 0
-	} // final fallback (rare)
+		return "", "", ""
+	}
 
 	answer = words[idx]
 	masked := append([]string{}, words...)

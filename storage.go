@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"sort"
 	"time"
 )
 
@@ -22,19 +23,27 @@ type Card struct {
 	LastReviewed time.Time `json:"last_reviewed"`
 	Streak       int       `json:"streak"`
 	TimesSeen    int       `json:"times_seen"`
-	SeenCount    int       `json:"seen_count"`
+	HistoryCount int       `json:"seen_count"` // times the command appears in shell history
 }
 
 // Load/Save to JSON in XDG data dir.
 func dataDir() (string, error) {
-	if d := os.Getenv("XDG_DATA_HOME"); d != "" {
-		return filepath.Join(d, "memento"), nil
+	base := os.Getenv("XDG_DATA_HOME")
+	if base == "" {
+		h, err := os.UserHomeDir()
+		if err != nil {
+			return "", err
+		}
+		base = filepath.Join(h, ".local", "share")
 	}
-	h, err := os.UserHomeDir()
-	if err != nil {
-		return "", err
+	d := filepath.Join(base, "memonto")
+	// one-time move from the pre-rename "memento" dir
+	if _, err := os.Stat(d); errors.Is(err, os.ErrNotExist) {
+		if err := os.Rename(filepath.Join(base, "memento"), d); err != nil && !errors.Is(err, os.ErrNotExist) {
+			return "", err
+		}
 	}
-	return filepath.Join(h, ".local", "share", "memento"), nil
+	return d, nil
 }
 
 func cardsPath() (string, error) {
@@ -76,7 +85,11 @@ func SaveCards(cards []Card) error {
 	if err != nil {
 		return err
 	}
-	return os.WriteFile(p, b, 0o644)
+	tmp := p + ".tmp"
+	if err := os.WriteFile(tmp, b, 0o600); err != nil {
+		return err
+	}
+	return os.Rename(tmp, p)
 }
 
 func UpsertCards(existing []Card, incoming []Card) []Card {
@@ -116,6 +129,7 @@ func union(a, b []string) []string {
 	for k := range m {
 		out = append(out, k)
 	}
+	sort.Strings(out)
 	return out
 }
 

@@ -6,11 +6,11 @@ import (
 )
 
 func usage() {
-	fmt.Println(`Memento — Shell History for Your Brain
+	fmt.Print(`Memonto — Shell History for Your Brain
 Usage:
-memento ingest # parse bash/zsh history → generate/update cards
-memento review # TUI daily review (Leitner boxes)
-memento help # show this help
+memonto ingest # parse bash/zsh history → generate/update cards
+memonto review # TUI daily review (Leitner boxes)
+memonto help # show this help
 `)
 }
 
@@ -26,13 +26,16 @@ func main() {
 		if err != nil {
 			fatal(err)
 		}
-		events := ParseHistory()
+		events, err := ParseHistory()
+		if err != nil {
+			fatal(err)
+		}
 		newCards := GenerateCards(events, cards)
+		cards = UpsertCards(cards, newCards)
+		if err := SaveCards(cards); err != nil {
+			fatal(err)
+		}
 		if len(newCards) > 0 {
-			cards = UpsertCards(cards, newCards)
-			if err := SaveCards(cards); err != nil {
-				fatal(err)
-			}
 			fmt.Printf("Ingested %d new cards. Total: %d\n", len(newCards), len(cards))
 		} else {
 			fmt.Println("No new tricky commands found. You're a wizard.")

@@ -62,6 +62,9 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			if len(m.cards) == 0 {
 				return m, tea.Quit
 			}
+			if m.checking {
+				break
+			}
 			ans := strings.TrimSpace(m.input.Value())
 			correct := checkAnswer(m.cards[m.idx], ans)
 			Grade(&m.cards[m.idx], correct, time.Now())
@@ -97,19 +100,16 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 }
 
 func checkAnswer(c Card, ans string) bool {
-	if ans == "" {
-		return false
-	}
-	A := strings.ToLower(strings.TrimSpace(c.Answer))
-	B := strings.ToLower(strings.TrimSpace(ans))
-	return A == B || strings.Contains(A, B) || strings.Contains(B, A)
+	ans = strings.TrimSpace(ans)
+	return ans != "" && ans == strings.TrimSpace(c.Answer)
 }
 
 func feedbackLine(ok bool, c Card) string {
+	full := "\n\n$ " + c.Command
 	if ok {
-		return "✔ Correct → " + c.Answer
+		return "✔ Correct → " + c.Answer + full
 	}
-	return "✘ Nope. Correct: " + c.Answer
+	return "✘ Nope. Correct: " + c.Answer + full
 }
 
 func RunTUI(all []Card) error {
